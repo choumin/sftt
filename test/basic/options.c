@@ -14,16 +14,28 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _COMPRESS_H_
-#define _COMPRESS_H_
+#include <stdio.h>
+#include <unistd.h>
 
-#define CHARSET_SIZE	256
-#define CHAR_BIT_LEN	8
-#define HUFFMAN_META_DATA_SIZE	(5 * (CHARSET_SIZE + 1))
+extern char *optarg;
+extern int optind;
+extern int optopt;
+extern int opterr;
 
-int huffman_compress(unsigned char *input, int input_len,
-	unsigned char **output);
-int huffman_decompress(unsigned char *input, unsigned char **output);
+int verbose = 0;
 
+int main(int argc, char **argv)
+{
+	int ch;
 
-#endif
+	while ((ch = getopt(argc, argv, "v")) != -1) {
+		switch (ch) {
+		case 'v':
+			verbose++;
+		}
+	}
+
+	printf("verbose=%d\n", verbose);
+
+	return 0;
+}

@@ -19,7 +19,7 @@ extern "C" {
 #define DIR_PATH_MAX_LEN 256
 #define FILE_NAME_MAX_LEN 256
 #define FILE_ENTRY_MAX_CNT 16
-#define CONTENT_BLOCK_SIZE 4096
+#define CONTENT_BLOCK_SIZE 2048
 #define NET_MSG_MAX_LEN 1024
 #define CMD_MAX_LEN 1024
 #define CMD_RET_BATCH_LEN 4096
@@ -190,6 +190,7 @@ struct get_resp {
 	int next;
 	char message[RESP_MESSAGE_MAX_LEN];
 	struct get_resp_data data;
+	int need_reply;
 };
 typedef struct get_resp get_resp;
 
@@ -206,6 +207,7 @@ struct put_req {
 	struct logged_in_user user;
 	struct put_req_data data;
 	int next;
+	int need_reply;
 };
 typedef struct put_req put_req;
 

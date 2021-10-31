@@ -72,6 +72,7 @@ struct sftt_option sftt_server_opts[] = {
 };
 
 extern struct mem_pool *g_mp;
+extern int verbose_level;
 
 struct sftt_server *server;
 
@@ -94,6 +95,8 @@ struct client_session *find_client_session_by_id(char *session_id);
 void put_peer_task_conn(struct client_sock_conn *conn);
 
 struct client_sock_conn *get_peer_task_conn(struct logged_in_user *user);
+
+void init_client_session(struct client_session *session);
 
 void server_init_func(struct sftt_server_config *server_config)
 {
@@ -140,7 +143,7 @@ int server_consult_block_size(int connect_fd, unsigned char *buff,int server_blo
 void server_file_resv(int connect_fd, int consulted_block_size,
 	struct sftt_server_config init_conf)
 {
-	struct sftt_packet *sp = malloc_sftt_packet(consulted_block_size);
+	struct sftt_packet *sp = malloc_sftt_packet();
 	int connected = 1;
 
 	while (connected){
@@ -804,6 +807,7 @@ int handle_fwd_get_req(struct client_session *client,
 	struct get_req *req;
 	struct get_resp *resp;
 	struct client_sock_conn *conn = NULL;
+	struct common_resp *com_resp;
 
 	req = req_packet->obj;
 	assert(req != NULL);
@@ -820,19 +824,35 @@ int handle_fwd_get_req(struct client_session *client,
 
 	// get or create peer session
 	conn = get_peer_task_conn(user);
+	
 	if (conn == NULL) {
+		DEBUG((DEBUG_INFO, "cannot get peer task conn!\n"));
 		return send_get_resp(client->main_conn.sock, resp_packet,
 				resp, RESP_CNT_GET_TASK_CONN, 0);
 	}
 
+	if (verbose_level > 0)
+		DEBUG((DEBUG_INFO, "get peer task conn|connect_id=%s\n",
+				conn->connect_id));
+
+	if (verbose_level > 0)
+		DEBUG((DEBUG_INFO, "send get req to peer|path=%s\n", req->path));
+
 	// send get req packet to peer task conn
 	ret = send_sftt_packet(conn->sock, req_packet);
 	if (ret == -1) {
-		DEBUG((DEBUG_INFO, "send ll req to peer failed!\n"));
+		DEBUG((DEBUG_INFO, "send get req to peer failed!\n"));
 		ret = send_get_resp(client->main_conn.sock, resp_packet,
 				resp, RESP_SEND_PEER_ERR, 0);
 		goto done;
 	}
+
+	if (verbose_level > 0)
+		DEBUG((DEBUG_INFO, "send get req to peer done|path=%s\n",
+				req->path));
+
+	if (verbose_level > 0)
+		DEBUG((DEBUG_INFO, "begin to recv file from peer\n"));
 
 	do {
 		// recv get resp packet
@@ -841,20 +861,51 @@ int handle_fwd_get_req(struct client_session *client,
 			DEBUG((DEBUG_INFO, "recv sftt packet failed!\n"));
 			goto done;
 		}
-
 		resp = (struct get_resp *)resp_packet->obj;
 		assert(resp != NULL);
 
-		send_get_resp(client->main_conn.sock, resp_packet,
+		if (verbose_level > 0)
+			DEBUG((DEBUG_INFO, "recv a packet\n"));
+
+		if (verbose_level > 0)
+			DEBUG((DEBUG_INFO, "send this packet to geter\n"));
+
+		ret = send_get_resp(client->main_conn.sock, resp_packet,
 			resp, RESP_OK, resp->next);
+
+		if (resp->need_reply) {
+			if (verbose_level > 0)
+				DEBUG((DEBUG_INFO, "this packet need reply\n"));
+
+			ret = recv_sftt_packet(client->main_conn.sock, resp_packet);
+			if (ret == -1) {
+				DEBUG((DEBUG_INFO, "recv sftt packet failed!\n"));
+				goto done;
+			}
+
+			if (verbose_level > 0)
+				DEBUG((DEBUG_INFO, "received a reply common resp\n"));
+
+			com_resp = (struct common_resp *)resp_packet->obj;
+			assert(com_resp != NULL);
+
+			if (verbose_level > 0)
+				DEBUG((DEBUG_INFO, "send this common resp to getee\n"));
+
+			ret = send_common_resp(conn->sock, resp_packet, com_resp, com_resp->status, 0);
+		}
+
+		if (verbose_level > 0)
+			DEBUG((DEBUG_INFO, "have next?|next=%d\n", resp->next));
 
 	} while (resp->next);
 
+	DEBUG((DEBUG_INFO, "handle get fwd req done!\n"));
 done:
 	if (conn)
 		put_peer_task_conn(conn);
 
-	return 0;
+	return ret;
 }
 
 #ifdef CONFIG_GET_OVERLAP
@@ -914,6 +965,7 @@ int handle_fwd_put_req(struct client_session *client,
 	struct peer_session *peer;
 	struct put_req *req;
 	struct put_resp *resp;
+	struct common_resp *com_resp;
 	struct client_sock_conn *conn = NULL;
 
 	resp = mp_malloc(g_mp, __func__, sizeof(put_resp));
@@ -937,6 +989,7 @@ int handle_fwd_put_req(struct client_session *client,
 			       resp, RESP_CNT_GET_TASK_CONN, 0);	
 	}
 
+#if 0
 	// send put req packet to peer task conn
 	ret = send_sftt_packet(conn->sock, req_packet);
 	if (ret == -1) {
@@ -945,20 +998,37 @@ int handle_fwd_put_req(struct client_session *client,
 				resp, RESP_SEND_PEER_ERR, 0);
 		goto done;
 	}
+#endif
 
 	do {
+		// send put req packet to peer task conn
+		ret = send_sftt_packet(conn->sock, req_packet);
+		if (ret == -1) {
+			DEBUG((DEBUG_ERROR, "send put req to peer failed!\n"));
+			goto done;
+		}
+
+		req = (struct put_req *)req_packet->obj;
+		if (req->need_reply) {
+			ret = recv_sftt_packet(conn->sock, resp_packet);
+			if (ret == -1) {
+				DEBUG((DEBUG_ERROR, "recv sftt packet failed!\n"));
+				goto done;
+			}
+			resp = (struct put_resp *)resp_packet->obj;
+			assert(resp != NULL);
+			ret = send_put_resp(client->main_conn.sock, resp_packet, resp, resp->status, 0);
+		}
+
+		if (!req->next)
+			break;
+
 		// recv put req packet
 		ret = recv_sftt_packet(client->main_conn.sock, req_packet);
 		if (ret == -1) {
 			DEBUG((DEBUG_INFO, "recv sftt packet failed!\n"));
 			goto done;
 		}
-
-		req = (struct put_req *)req_packet->obj;
-		assert(req != NULL);
-
-		send_sftt_packet(conn->sock, req_packet);
-
 	} while (req->next);
 
 done:
@@ -1188,10 +1258,12 @@ int check_user(struct logged_in_user *user)
 
 	for (i = 0; i < MAX_CLIENT_NUM; ++i) {
 		session = &server->sessions[i];
-		DEBUG((DEBUG_INFO, "session->session_id=%s|user->session_id=%s\n",
-				session->session_id, user->session_id));
 		if (client_connected(session) &&
 			strcmp(session->session_id, user->session_id) == 0) {
+
+			DEBUG((DEBUG_INFO, "session->session_id=%s|user->session_id=%s\n",
+				session->session_id, user->session_id));
+
 			strncpy(user->ip, session->ip, IPV4_MAX_LEN);
 			ret = 0;
 			goto done;
@@ -1291,9 +1363,15 @@ int handle_append_conn_req(struct client_session *client,
 	struct client_session *real_session;
 	struct append_conn_resp *resp;
 	struct client_sock_conn *conn;
+	int ret;
+
+	DEBUG((DEBUG_INFO, "handle append_conn req in ...\n"));
 
 	req = req_packet->obj;
 	assert(req != NULL);
+
+	DEBUG((DEBUG_INFO, "req->session_id=%s|req->type=%d\n",
+			req->session_id, req->type));
 
 	if (req->type != CONN_TYPE_TASK) {
 		DEBUG((DEBUG_INFO, "invalid connect type: %d\n", req->type));
@@ -1305,6 +1383,8 @@ int handle_append_conn_req(struct client_session *client,
 		DEBUG((DEBUG_INFO, "invalid session id: %s\n", req->session_id));
 		return -1;
 	}
+	DEBUG((DEBUG_INFO, "find client session: session_id=%s\n",
+			real_session->session_id));
 
 	resp = mp_malloc(g_mp, "append_conn_resp", sizeof(struct append_conn_resp));
 	if (resp == NULL) {
@@ -1319,20 +1399,31 @@ int handle_append_conn_req(struct client_session *client,
 			return -1;
 		}
 
+		DEBUG((DEBUG_INFO, "conn=%p\n", conn));
 		*conn = client->main_conn;
+		DEBUG((DEBUG_INFO, "conn->connect_id=%s\n", conn->connect_id));
 		conn->type = CONN_TYPE_TASK;
+		conn->is_using = false;
 
+		DEBUG((DEBUG_INFO, "conn->type=%d, conn->is_using=%d\n",
+				conn->type, conn->is_using));
 		list_add(&conn->list, &real_session->task_conns);
 
+		DEBUG((DEBUG_INFO, "before copy connect_id\n"));
 		strncpy(resp->data.connect_id, conn->connect_id, CONNECT_ID_LEN);
+		DEBUG((DEBUG_INFO, "resp->data.connect_id=%s\n", resp->data.connect_id));
+		DEBUG((DEBUG_INFO, "append a new conn: session_id=%s|connect_id=%s\n",
+				real_session->session_id, conn->connect_id));
 
-		return send_append_conn_resp(client->main_conn.sock, resp_packet, resp, RESP_OK, 0);
+		ret = send_append_conn_resp(client->main_conn.sock, resp_packet, resp, RESP_OK, 0);
 	} else {
-		return send_append_conn_resp(client->main_conn.sock, resp_packet, resp,
+		ret = send_append_conn_resp(client->main_conn.sock, resp_packet, resp,
 				RESP_UNKNOWN_CONN_TYPE, 0); 
 	}
 
-	return 0;
+	DEBUG((DEBUG_INFO, "handle append_conn req out ...\n"));
+
+	return ret;
 }
 
 void *handle_client_session(void *args)
@@ -1344,10 +1435,15 @@ void *handle_client_session(void *args)
 	int ret;
 
 	DEBUG((DEBUG_INFO, "begin handle client session ...\n"));
-	req = malloc_sftt_packet(REQ_PACKET_MIN_LEN);
+	req = malloc_sftt_packet();
 	if (!req) {
 		printf("cannot allocate resources from memory pool!\n");
 		return NULL;
+	}
+
+	resp = malloc_sftt_packet();
+	if (resp == NULL) {
+		goto exit;
 	}
 
 	signal(SIGTERM, child_process_exit);
@@ -1367,11 +1463,6 @@ void *handle_client_session(void *args)
 		}
 		switch (req->type) {
 		case PACKET_TYPE_VALIDATE_REQ:
-			resp = malloc_sftt_packet(VALIDATE_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
-
 			ret = validate_user_info(client, req, resp);
 			if (ret == -1) {
 				free_sftt_packet(&resp);
@@ -1379,80 +1470,40 @@ void *handle_client_session(void *args)
 			}
 			break;
 		case PACKET_TYPE_APPEND_CONN_REQ:
-			resp = malloc_sftt_packet(APPEND_CONN_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_append_conn_req(client, req, resp);
 			goto exit;
 		case PACKET_TYPE_PWD_REQ:
-			resp = malloc_sftt_packet(PWD_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_pwd_req(client, req, resp);
 			break;
 		case PACKET_TYPE_CD_REQ:
-			resp = malloc_sftt_packet(CD_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_cd_req(client, req, resp);
 			break;
 		case PACKET_TYPE_LL_REQ:
-			resp = malloc_sftt_packet(LL_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_ll_req(client, req, resp);
 			break;
 		case PACKET_TYPE_PUT_REQ:
-			resp = malloc_sftt_packet(PUT_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_put_req(client, req, resp);
 			break;
 		case PACKET_TYPE_GET_REQ:
-			resp = malloc_sftt_packet(GET_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_get_req(client, req, resp);
 			break;
 		case PACKET_TYPE_MP_STAT_REQ:
-			resp = malloc_sftt_packet(MP_STAT_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_mp_stat_req(client, req, resp);
 			break;
 		case PACKET_TYPE_DIRECTCMD_REQ:
-			resp = malloc_sftt_packet(DIRECTCMD_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_directcmd_req(client, req, resp);
 			break;
 		case PACKET_TYPE_WHO_REQ:
-			resp = malloc_sftt_packet(WHO_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_who_req(client, req, resp);
 			break;
 		case PACKET_TYPE_WRITE_REQ:
-			resp = malloc_sftt_packet(WRITE_RESP_PACKET_MIN_LEN);
-			if (resp == NULL) {
-				goto exit;
-			}
 			handle_write_req(client, req, resp);
 			break;
 		default:
 			printf("%s: cannot recognize packet type!\n", __func__);
 			break;
 		}
-		free_sftt_packet(&resp);
+		//free_sftt_packet(&resp);
 	}
 
 exit:
@@ -1483,7 +1534,10 @@ struct client_session *get_new_session(void)
 
 	for (i = 0; i < MAX_CLIENT_NUM; ++i) {
 		if (!client_connected(&server->sessions[i])) {
+
+			init_client_session(&server->sessions[i]);
 			set_client_active(&server->sessions[i]);
+
 			return &server->sessions[i];
 		}
 	}

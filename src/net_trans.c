@@ -33,7 +33,7 @@
 extern struct mem_pool *g_mp;
 extern struct serialize_handler serializables[];
 
-struct sftt_packet *malloc_sftt_packet(int block_size)
+struct sftt_packet *malloc_sftt_packet(void)
 {
 	struct sftt_packet *sp = (struct sftt_packet *)mp_malloc(g_mp,
 		"sftt_packet_struct", sizeof(struct sftt_packet));
@@ -42,15 +42,6 @@ struct sftt_packet *malloc_sftt_packet(int block_size)
 	}	
 	memset(sp, 0, sizeof(*sp));
 
-	sp->content = (unsigned char *)mp_malloc(g_mp,
-		"sftt_packet_content", sizeof(unsigned char) * block_size);
-
-	if (sp->content == NULL) {
-		mp_free(g_mp, sp);
-		return NULL;
-	}
-	sp->block_size = block_size;	
-	
 	return sp;
 }
 
@@ -59,10 +50,10 @@ int sftt_packet_encode_content(struct sftt_packet *src, struct sftt_packet *dst)
 	/*
 	 * 1. compress and encrypt content
 	 * 2. update content len in header
-	 * */
+	 */
 	add_log(LOG_INFO, "%s: in, data_len=%d", __func__, src->data_len);
 	dst->data_len = sftt_buffer_encode(src->content, src->data_len,
-		dst->content, true, true);
+		&dst->content, true, true);
 	add_log(LOG_INFO, "%s: out, data_len=%d", __func__, dst->data_len);
 	
 	return 0;
@@ -81,10 +72,12 @@ void sftt_packet_send_header(int sock, struct sftt_packet *sp)
 	memcpy(header, &(sp->type), PACKET_TYPE_SIZE);
 	memcpy(header + PACKET_TYPE_SIZE, &(sp->data_len), PACKET_LEN_SIZE);
 	
+#if 0
 	buffer = mp_malloc(g_mp, __func__, header_len);
 	assert(buffer != NULL);
+#endif
 
-	encoded_len = sftt_buffer_encode(header, header_len, buffer, false, false);
+	encoded_len = sftt_buffer_encode(header, header_len, &buffer, false, false);
 	assert(encoded_len == header_len);
 
 	ret = send(sock, buffer, encoded_len, 0);
@@ -124,14 +117,11 @@ bool sftt_packet_serialize(struct sftt_packet *sp)
 		if (sp->type == serializables[i].packet_type) {
 			ret = serializables[i].serialize(sp->obj, &buf, &len);
 			if (ret && buf) {
-				if (len < sp->block_size) {
-					memcpy(sp->content, buf, len);
-					sp->data_len = len;
-				} else {
-					printf("%s: encoded len "
-						"more then block size\n",
-						__func__);
-				}
+				sp->content = mp_malloc(g_mp, __func__,
+						len * sizeof(unsigned char));
+				memcpy(sp->content, buf, len);
+				sp->data_len = len;
+
 				free(buf);
 			}
 			add_log(LOG_INFO, "%s: out, ret=%d", __func__, ret);
@@ -165,22 +155,25 @@ int send_sftt_packet(int sock, struct sftt_packet *sp)
 	struct sftt_packet *_sp;
 
 	add_log(LOG_INFO, "%s: in", __func__);
-	add_log(LOG_INFO, "%s: before serialize, packet_size=%d", __func__,
-		sp->block_size * 2);
+	add_log(LOG_INFO, "%s: before serialize, packet data_len=%d", __func__,
+		sp->data_len);
+
 	if (!sftt_packet_serialize(sp)) {
 		printf("sftt packet serialize failed!\n");
 		return -1;
 	}
-	//printf("%s: after serialize, packet data_len: %d\n", __func__, sp->data_len);
+	add_log(LOG_INFO, "%s: after serialize, packet data_len=%d", __func__,
+		sp->data_len);
 
-	_sp = malloc_sftt_packet(sp->block_size * 2);
+	_sp = malloc_sftt_packet();
 	if (_sp == NULL) {
-		printf("malloc failed! size=%d\n", sp->block_size * 2);
+		printf("%s:%d, malloc sftt packet failed!\n", __func__, __LINE__);
 		return -1;
 	}
 
-	add_log(LOG_INFO, "%s: before encode content, data_len=%d", __func__,
+	add_log(LOG_INFO, "%s: before encode content, packet data_len=%d", __func__,
 		sp->data_len);
+
 	_sp->type = sp->type;
 	sftt_packet_encode_content(sp, _sp);
 
@@ -203,7 +196,7 @@ int sftt_packet_decode_content(struct sftt_packet *src, struct sftt_packet *dst)
 	*/
 	add_log(LOG_INFO, "%s: in", __func__);
  	dst->data_len = sftt_buffer_decode(src->content, src->data_len,
-		dst->content, true, true);
+		&dst->content, true, true);
 	add_log(LOG_INFO, "%s: after decode, data_len=%d", __func__, dst->data_len);
 	add_log(LOG_INFO, "%s: out", __func__);
 
@@ -232,11 +225,13 @@ int sftt_packet_recv_header(int sock, struct sftt_packet *sp)
 		return -1;
 	}
 
+#if 0
 	buffer = mp_malloc(g_mp, __func__, header_len);
 	assert(buffer != NULL);
+#endif
 
 	add_log(LOG_INFO, "%s: before decode header", __func__);
-	decoded_len = sftt_buffer_decode(header, header_len, buffer, false, false);
+	decoded_len = sftt_buffer_decode(header, header_len, &buffer, false, false);
 	assert(decoded_len == header_len);
 
 	add_log(LOG_INFO, "%s: header decoded len: %d", __func__, decoded_len);
@@ -258,7 +253,7 @@ int sftt_packet_recv_content(int sock, struct sftt_packet *sp)
 	int ret;
 	add_log(LOG_INFO, "%s: in", __func__);
 
-	memset(sp->content, 0, sp->block_size);
+	sp->content = mp_malloc(g_mp, __func__, sp->data_len * sizeof(unsigned char));
 
 	ret = recv(sock, sp->content, sp->data_len, 0 | MSG_WAITALL);
 	if (ret != sp->data_len) {
@@ -269,7 +264,7 @@ int sftt_packet_recv_content(int sock, struct sftt_packet *sp)
 		}
 		return -1;
 	}
-	add_log(LOG_INFO, "%s, receive content: ret=%d, sp->data_len=%d", __func__,
+	add_log(LOG_INFO, "%s: receive content, ret=%d, sp->data_len=%d", __func__,
 		ret, sp->data_len);
 
 #if 0
@@ -283,8 +278,8 @@ int sftt_packet_recv_content(int sock, struct sftt_packet *sp)
 
 int recv_sftt_packet(int sock, struct sftt_packet *sp)
 {
-	struct sftt_packet *_sp = malloc_sftt_packet(sp->block_size * 2);
-	int ret;
+	struct sftt_packet *_sp = malloc_sftt_packet();
+	int ret, recv_len = 0;
 
 	assert(_sp != NULL);
 	add_log(LOG_INFO, "%s: in", __func__);
@@ -295,6 +290,8 @@ int recv_sftt_packet(int sock, struct sftt_packet *sp)
 		return ret;
 	}
 
+	recv_len += ret;
+
 	add_log(LOG_INFO, "%s: before receive content", __func__);
 	ret = sftt_packet_recv_content(sock, _sp);
 	if (!(ret > 0)) {
@@ -302,10 +299,14 @@ int recv_sftt_packet(int sock, struct sftt_packet *sp)
 		return ret;
 	}
 
+	recv_len += ret;
+
 	sp->type = _sp->type;
 	add_log(LOG_INFO, "%s: receive packet type: %d", __func__, sp->type);
 	add_log(LOG_INFO, "%s: before decode content", __func__);
+
 	sftt_packet_decode_content(_sp, sp);
+	DEBUG((DEBUG_INFO, "after decode|sp->data_len=%d\n", sp->data_len));
 
 	add_log(LOG_INFO, "%s: before deserialize", __func__);
 	if (!sftt_packet_deserialize(sp)) {
@@ -315,16 +316,24 @@ int recv_sftt_packet(int sock, struct sftt_packet *sp)
 	free_sftt_packet(&_sp);	
 	add_log(LOG_INFO, "%s: out", __func__);
 		
-	return sp->data_len;
+	return recv_len;
 } 
 
 void free_sftt_packet(struct sftt_packet **sp)
 {
 	if (sp && *sp) {
+		if ((*sp)->content) {
+			mp_free(g_mp, (*sp)->content);
+			(*sp)->content = NULL;
+		}
+#if 0
 		mp_free(g_mp, (*sp)->content);
+#endif
 		mp_free(g_mp, *sp);
+#if 0
 		if ((*sp)->obj)
 			mp_free(g_mp, (*sp)->obj);
+#endif
 		*sp = NULL;
 	} 
 }
